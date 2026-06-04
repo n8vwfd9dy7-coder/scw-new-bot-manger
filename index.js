@@ -1,22 +1,32 @@
 require("dotenv").config();
+
 const {
   Client,
   GatewayIntentBits,
   REST,
   Routes,
-  SlashCommandBuilder,
-  PermissionsBitField
+  SlashCommandBuilder
 } = require("discord.js");
 
 const sqlite3 = require("sqlite3").verbose();
-const db = new sqlite3.Database("./scw.db");
 
-// ================= BOT =================
+// ================= SAFETY CHECK =================
+if (!process.env.DISCORD_TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
+  console.log("❌ Missing ENV variables (DISCORD_TOKEN / CLIENT_ID / GUILD_ID)");
+  process.exit(1);
+}
+
+// ================= CLIENT =================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers
+  ]
 });
 
 // ================= DB =================
+const db = new sqlite3.Database("./scw.db");
+
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS config (
     guild_id TEXT PRIMARY KEY,
@@ -27,21 +37,6 @@ db.serialize(() => {
     free_agent_role TEXT,
     score_channel TEXT,
     strike_channel TEXT
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS teams (
-    guild_id TEXT,
-    name TEXT,
-    role_id TEXT,
-    wins INTEGER DEFAULT 0,
-    losses INTEGER DEFAULT 0
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS players (
-    guild_id TEXT,
-    user_id TEXT,
-    team TEXT,
-    strikes INTEGER DEFAULT 0
   )`);
 });
 
@@ -54,16 +49,18 @@ async function reply(i, msg) {
       await i.reply({ content: msg, ephemeral: true });
     }
   } catch (e) {
-    console.log(e);
+    console.log("Reply error:", e);
   }
 }
 
 // ================= GET CONFIG =================
 function getConfig(guildId) {
-  return new Promise((res) => {
-    db.get(`SELECT * FROM config WHERE guild_id=?`, [guildId], (err, row) => {
-      res(row);
-    });
+  return new Promise((resolve) => {
+    db.get(
+      `SELECT * FROM config WHERE guild_id=?`,
+      [guildId],
+      (err, row) => resolve(row)
+    );
   });
 }
 
@@ -81,40 +78,39 @@ const commands = [
     .addStringOption(o => o.setName("strike_channel").setRequired(true)),
 
   new SlashCommandBuilder()
-    .setName("addteam")
-    .setDescription("Create team")
-    .addStringOption(o => o.setName("name").setRequired(true)),
-
-  new SlashCommandBuilder()
     .setName("lock")
-    .setDescription("Lock channel")
+    .setDescription("Lock a channel")
     .addChannelOption(o => o.setName("channel").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("unlock")
-    .setDescription("Unlock channel")
+    .setDescription("Unlock a channel")
     .addChannelOption(o => o.setName("channel").setRequired(true))
 ].map(c => c.toJSON());
 
 // ================= REGISTER COMMANDS =================
-async function register() {
-  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+async function registerCommands() {
+  try {
+    const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
-  await rest.put(
-    Routes.applicationGuildCommands(
-      process.env.CLIENT_ID,
-      process.env.GUILD_ID
-    ),
-    { body: commands }
-  );
+    await rest.put(
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID,
+        process.env.GUILD_ID
+      ),
+      { body: commands }
+    );
 
-  console.log("✅ Commands registered");
+    console.log("✅ Commands registered");
+  } catch (err) {
+    console.log("❌ Command registration failed:", err);
+  }
 }
 
 // ================= READY =================
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  await register();
+  await registerCommands();
 });
 
 // ================= INTERACTIONS =================
@@ -141,30 +137,15 @@ client.on("interactionCreate", async (i) => {
       ],
       (err) => {
         if (err) return reply(i, "❌ Setup failed");
-        reply(i, "✅ Setup complete");
+        reply(i, "✅ SCW setup complete");
       }
     );
 
     return;
   }
 
+  // block if not setup
   if (!config) return reply(i, "❌ Run /setup first");
-
-  // ================= ADD TEAM =================
-  if (i.commandName === "addteam") {
-    await i.deferReply({ ephemeral: true });
-
-    const name = i.options.getString("name");
-
-    db.run(
-      `INSERT INTO teams VALUES (?, ?, ?, 0, 0)`,
-      [i.guild.id, name, "TEMP_ROLE"],
-      (err) => {
-        if (err) return reply(i, "❌ Error creating team");
-        reply(i, `✅ Team ${name} created (role system can be upgraded next)`);
-      }
-    );
-  }
 
   // ================= LOCK =================
   if (i.commandName === "lock") {
@@ -172,11 +153,16 @@ client.on("interactionCreate", async (i) => {
 
     const channel = i.options.getChannel("channel");
 
-    await channel.permissionOverwrites.edit(i.guild.roles.everyone, {
-      SendMessages: false
-    });
+    try {
+      await channel.permissionOverwrites.edit(i.guild.roles.everyone, {
+        SendMessages: false
+      });
 
-    reply(i, "🔒 Locked channel");
+      reply(i, "🔒 Channel locked");
+    } catch (e) {
+      console.log(e);
+      reply(i, "❌ Lock failed (permissions issue)");
+    }
   }
 
   // ================= UNLOCK =================
@@ -185,11 +171,16 @@ client.on("interactionCreate", async (i) => {
 
     const channel = i.options.getChannel("channel");
 
-    await channel.permissionOverwrites.edit(i.guild.roles.everyone, {
-      SendMessages: true
-    });
+    try {
+      await channel.permissionOverwrites.edit(i.guild.roles.everyone, {
+        SendMessages: true
+      });
 
-    reply(i, "🔓 Unlocked channel");
+      reply(i, "🔓 Channel unlocked");
+    } catch (e) {
+      console.log(e);
+      reply(i, "❌ Unlock failed (permissions issue)");
+    }
   }
 });
 
